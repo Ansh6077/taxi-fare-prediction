@@ -2,3 +2,5 @@ streamlit
 databricks-sdk
 streamlit-folium
 folium
+requests
+shapely
