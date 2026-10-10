@@ -3,14 +3,25 @@ import folium
 from streamlit_folium import st_folium
 from databricks.sdk import WorkspaceClient
 
+# ---------------------------------------------------------
+# PAGE CONFIGURATION
+# ---------------------------------------------------------
+
 st.set_page_config(
     page_title="NYC Taxi Fare Prediction",
     page_icon="🚕",
     layout="centered"
 )
 
+# ---------------------------------------------------------
+# TITLE
+# ---------------------------------------------------------
+
 st.title("🚕 NYC Taxi Fare Prediction")
-st.write("Predict your taxi fare using a Machine Learning model.")
+
+st.write(
+    "Predict your taxi fare using a Machine Learning model."
+)
 
 st.divider()
 
@@ -21,39 +32,121 @@ st.divider()
 st.subheader("🗺️ Select Your Trip Locations")
 
 st.write(
-    "Click on the map to select your pickup and drop-off locations."
+    "Choose Pickup or Drop-off, then click on the map."
 )
 
-# Default NYC coordinates
-nyc_lat = 40.7580
-nyc_lon = -73.9855
+# Initialize pickup location
+if "pickup_location" not in st.session_state:
+    st.session_state.pickup_location = None
 
+# Initialize drop-off location
+if "dropoff_location" not in st.session_state:
+    st.session_state.dropoff_location = None
+
+# Select location type
+location_type = st.radio(
+    "What location do you want to select?",
+    ["📍 Pickup", "🚩 Drop-off"],
+    horizontal=True
+)
+
+# Create NYC map
 m = folium.Map(
-    location=[nyc_lat, nyc_lon],
+    location=[40.7580, -73.9855],
     zoom_start=11
 )
 
-# Add a marker for the pickup location
-folium.Marker(
-    [40.7580, -73.9855],
-    popup="Pickup Location",
-    tooltip="Pickup",
-    icon=folium.Icon(icon="play")
-).add_to(m)
+# ---------------------------------------------------------
+# PICKUP MARKER
+# ---------------------------------------------------------
 
-# Add a marker for the drop-off location
-folium.Marker(
-    [40.7306, -73.9352],
-    popup="Drop-off Location",
-    tooltip="Drop-off",
-    icon=folium.Icon(icon="flag")
-).add_to(m)
+if st.session_state.pickup_location:
+
+    folium.Marker(
+        [
+            st.session_state.pickup_location["lat"],
+            st.session_state.pickup_location["lng"]
+        ],
+        popup="📍 Pickup Location",
+        tooltip="Pickup",
+        icon=folium.Icon(
+            color="green",
+            icon="play"
+        )
+    ).add_to(m)
+
+# ---------------------------------------------------------
+# DROP-OFF MARKER
+# ---------------------------------------------------------
+
+if st.session_state.dropoff_location:
+
+    folium.Marker(
+        [
+            st.session_state.dropoff_location["lat"],
+            st.session_state.dropoff_location["lng"]
+        ],
+        popup="🚩 Drop-off Location",
+        tooltip="Drop-off",
+        icon=folium.Icon(
+            color="red",
+            icon="flag"
+        )
+    ).add_to(m)
+
+# ---------------------------------------------------------
+# DISPLAY MAP
+# ---------------------------------------------------------
 
 map_data = st_folium(
     m,
     width=700,
-    height=450
+    height=450,
+    returned_objects=["last_clicked"]
 )
+
+# ---------------------------------------------------------
+# HANDLE MAP CLICK
+# ---------------------------------------------------------
+
+if map_data and map_data.get("last_clicked"):
+
+    clicked = map_data["last_clicked"]
+
+    selected_location = {
+        "lat": clicked["lat"],
+        "lng": clicked["lng"]
+    }
+
+    if location_type == "📍 Pickup":
+
+        st.session_state.pickup_location = selected_location
+
+    else:
+
+        st.session_state.dropoff_location = selected_location
+
+    st.rerun()
+
+# ---------------------------------------------------------
+# DISPLAY SELECTED LOCATIONS
+# ---------------------------------------------------------
+
+if st.session_state.pickup_location:
+
+    st.success(
+        f"📍 Pickup: "
+        f"{st.session_state.pickup_location['lat']:.5f}, "
+        f"{st.session_state.pickup_location['lng']:.5f}"
+    )
+
+if st.session_state.dropoff_location:
+
+    st.success(
+        f"🚩 Drop-off: "
+        f"{st.session_state.dropoff_location['lat']:.5f}, "
+        f"{st.session_state.dropoff_location['lng']:.5f}"
+    )
 
 st.divider()
 
@@ -64,6 +157,10 @@ st.divider()
 st.subheader("Enter Trip Details")
 
 col1, col2 = st.columns(2)
+
+# ---------------------------------------------------------
+# LEFT COLUMN
+# ---------------------------------------------------------
 
 with col1:
 
@@ -97,6 +194,9 @@ with col1:
         step=1
     )
 
+# ---------------------------------------------------------
+# RIGHT COLUMN
+# ---------------------------------------------------------
 
 with col2:
 
@@ -133,21 +233,28 @@ with col2:
 st.divider()
 
 # ---------------------------------------------------------
-# PREDICTION
+# PREDICT FARE
 # ---------------------------------------------------------
 
-if st.button("🔮 Predict Fare", use_container_width=True):
+if st.button(
+    "🔮 Predict Fare",
+    use_container_width=True
+):
 
     try:
 
-        with st.spinner("Predicting your taxi fare..."):
+        with st.spinner(
+            "Predicting your taxi fare..."
+        ):
 
+            # Connect to Databricks
             workspace = WorkspaceClient(
                 host=st.secrets["DATABRICKS_HOST"],
                 client_id=st.secrets["DATABRICKS_CLIENT_ID"],
                 client_secret=st.secrets["DATABRICKS_CLIENT_SECRET"]
             )
 
+            # Send data to model serving endpoint
             response = workspace.serving_endpoints.query(
                 name="taxi-fare-prediction-endpoint",
                 dataframe_records=[
@@ -164,8 +271,10 @@ if st.button("🔮 Predict Fare", use_container_width=True):
                 ]
             )
 
+            # Get prediction
             prediction = response.predictions[0]
 
+        # Display prediction
         st.success(
             f"💰 Predicted Taxi Fare: ${prediction:.2f}"
         )
