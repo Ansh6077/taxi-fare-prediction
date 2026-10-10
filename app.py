@@ -1,174 +1,311 @@
-import streamlit as st
-import folium
-from streamlit_folium import st_folium
-from databricks.sdk import WorkspaceClient
+import os
 
-# ---------------------------------------------------------
+import folium
+import requests
+import streamlit as st
+from databricks.sdk import WorkspaceClient
+from shapely.geometry import Point, shape
+from streamlit_folium import st_folium
+
+
+# --------------------------------------------------
 # PAGE CONFIGURATION
-# ---------------------------------------------------------
+# --------------------------------------------------
 
 st.set_page_config(
-    page_title="NYC Taxi Fare Prediction",
+    page_title="NYC Taxi Fare Predictor",
     page_icon="🚕",
-    layout="centered"
+    layout="wide"
 )
 
-# ---------------------------------------------------------
-# TITLE
-# ---------------------------------------------------------
-
-st.title("🚕 NYC Taxi Fare Prediction")
-
+st.title("🚕 NYC Taxi Fare Predictor")
 st.write(
-    "Predict your taxi fare using a Machine Learning model."
+    "Select your pickup and drop-off locations on the map "
+    "to estimate your taxi fare."
 )
 
-st.divider()
 
-# ---------------------------------------------------------
-# NYC MAP
-# ---------------------------------------------------------
+# --------------------------------------------------
+# DATBRICKS CONNECTION
+# --------------------------------------------------
 
-st.subheader("🗺️ Select Your Trip Locations")
+def get_workspace_client():
+    """Create an authenticated Databricks workspace client."""
 
-st.write(
-    "Choose Pickup or Drop-off, then click on the map."
-)
+    os.environ["DATABRICKS_HOST"] = st.secrets["DATABRICKS_HOST"]
+    os.environ["DATABRICKS_CLIENT_ID"] = st.secrets[
+        "DATABRICKS_CLIENT_ID"
+    ]
+    os.environ["DATABRICKS_CLIENT_SECRET"] = st.secrets[
+        "DATABRICKS_CLIENT_SECRET"
+    ]
 
-# Initialize pickup location
+    return WorkspaceClient()
+
+
+# --------------------------------------------------
+# LOAD NYC TAXI ZONES
+# --------------------------------------------------
+
+@st.cache_data(ttl=86400)
+def load_taxi_zones():
+    """Download and cache the official NYC taxi zone polygons."""
+
+    url = (
+        "https://data.cityofnewyork.us/api/v3/views/"
+        "8meu-9t5y/query.geojson?accessType=DOWNLOAD"
+    )
+
+    response = requests.get(url, timeout=30)
+    response.raise_for_status()
+
+    geojson = response.json()
+
+    zones = []
+
+    for feature in geojson.get("features", []):
+        properties = feature.get("properties", {})
+
+        # Handle differences in property-name capitalization.
+        normalized = {
+            str(key).lower(): value
+            for key, value in properties.items()
+        }
+
+        geometry_data = feature.get("geometry")
+
+        if not geometry_data:
+            continue
+
+        location_id = (
+            normalized.get("locationid")
+            or normalized.get("location_id")
+        )
+
+        zone_name = normalized.get("zone", "Unknown Zone")
+        borough = normalized.get("borough", "Unknown Borough")
+
+        if location_id is None:
+            continue
+
+        zones.append(
+            {
+                "location_id": int(float(location_id)),
+                "zone": zone_name,
+                "borough": borough,
+                "geometry": shape(geometry_data),
+            }
+        )
+
+    if not zones:
+        raise ValueError(
+            "No taxi zones were found in the downloaded dataset."
+        )
+
+    return zones
+
+
+# --------------------------------------------------
+# FIND ZONE FROM MAP COORDINATES
+# --------------------------------------------------
+
+def find_taxi_zone(latitude, longitude, zones):
+    """Find the taxi zone containing a clicked map location."""
+
+    clicked_point = Point(longitude, latitude)
+
+    for zone in zones:
+        if zone["geometry"].covers(clicked_point):
+            return {
+                "lat": latitude,
+                "lng": longitude,
+                "location_id": zone["location_id"],
+                "zone": zone["zone"],
+                "borough": zone["borough"],
+            }
+
+    return None
+
+
+# --------------------------------------------------
+# SESSION STATE
+# --------------------------------------------------
+
 if "pickup_location" not in st.session_state:
     st.session_state.pickup_location = None
 
-# Initialize drop-off location
 if "dropoff_location" not in st.session_state:
     st.session_state.dropoff_location = None
 
-# Select location type
+if "last_processed_click" not in st.session_state:
+    st.session_state.last_processed_click = None
+
+
+# --------------------------------------------------
+# LOAD ZONE DATA
+# --------------------------------------------------
+
+try:
+    taxi_zones = load_taxi_zones()
+except Exception:
+    st.error(
+        "Unable to load NYC taxi zone information. "
+        "Please refresh the page and try again."
+    )
+    st.stop()
+
+
+# --------------------------------------------------
+# MAP LOCATION SELECTION
+# --------------------------------------------------
+
+st.subheader("📍 Select Your Locations")
+
 location_type = st.radio(
     "What location do you want to select?",
     ["📍 Pickup", "🚩 Drop-off"],
-    horizontal=True
+    horizontal=True,
 )
 
-# Create NYC map
-m = folium.Map(
+st.info(
+    "Choose Pickup or Drop-off above, then click the "
+    "corresponding location on the map."
+)
+
+taxi_map = folium.Map(
     location=[40.7580, -73.9855],
-    zoom_start=11
+    zoom_start=11,
+    control_scale=True,
 )
 
-# ---------------------------------------------------------
-# PICKUP MARKER
-# ---------------------------------------------------------
+# Show the selected pickup marker.
+pickup = st.session_state.pickup_location
 
-if st.session_state.pickup_location:
-
+if pickup:
     folium.Marker(
-        [
-            st.session_state.pickup_location["lat"],
-            st.session_state.pickup_location["lng"]
-        ],
-        popup="📍 Pickup Location",
-        tooltip="Pickup",
-        icon=folium.Icon(
-            color="green",
-            icon="play"
-        )
-    ).add_to(m)
+        location=[pickup["lat"], pickup["lng"]],
+        tooltip=f"Pickup: {pickup['zone']}",
+        popup=(
+            f"Pickup Zone: {pickup['zone']}<br>"
+            f"Borough: {pickup['borough']}<br>"
+            f"Location ID: {pickup['location_id']}"
+        ),
+        icon=folium.Icon(color="green", icon="ok-sign"),
+    ).add_to(taxi_map)
 
-# ---------------------------------------------------------
-# DROP-OFF MARKER
-# ---------------------------------------------------------
+# Show the selected drop-off marker.
+dropoff = st.session_state.dropoff_location
 
-if st.session_state.dropoff_location:
-
+if dropoff:
     folium.Marker(
-        [
-            st.session_state.dropoff_location["lat"],
-            st.session_state.dropoff_location["lng"]
-        ],
-        popup="🚩 Drop-off Location",
-        tooltip="Drop-off",
-        icon=folium.Icon(
-            color="red",
-            icon="flag"
-        )
-    ).add_to(m)
-
-# ---------------------------------------------------------
-# DISPLAY MAP
-# ---------------------------------------------------------
+        location=[dropoff["lat"], dropoff["lng"]],
+        tooltip=f"Drop-off: {dropoff['zone']}",
+        popup=(
+            f"Drop-off Zone: {dropoff['zone']}<br>"
+            f"Borough: {dropoff['borough']}<br>"
+            f"Location ID: {dropoff['location_id']}"
+        ),
+        icon=folium.Icon(color="red", icon="flag"),
+    ).add_to(taxi_map)
 
 map_data = st_folium(
-    m,
-    width=700,
-    height=450,
-    returned_objects=["last_clicked"]
+    taxi_map,
+    width=900,
+    height=500,
+    returned_objects=["last_clicked"],
+    key="nyc_taxi_map",
 )
 
-# ---------------------------------------------------------
-# HANDLE MAP CLICK
-# ---------------------------------------------------------
+# Process each new map click only once.
+clicked = map_data.get("last_clicked") if map_data else None
 
-if map_data and map_data.get("last_clicked"):
+if clicked:
+    latitude = clicked.get("lat")
+    longitude = clicked.get("lng")
 
-    clicked = map_data["last_clicked"]
+    if latitude is not None and longitude is not None:
+        click_key = (
+            round(latitude, 6),
+            round(longitude, 6),
+        )
 
-    selected_location = {
-        "lat": clicked["lat"],
-        "lng": clicked["lng"]
-    }
+        if click_key != st.session_state.last_processed_click:
+            st.session_state.last_processed_click = click_key
 
-    if location_type == "📍 Pickup":
+            selected_zone = find_taxi_zone(
+                latitude,
+                longitude,
+                taxi_zones,
+            )
 
-        st.session_state.pickup_location = selected_location
+            if selected_zone:
+                if location_type == "📍 Pickup":
+                    st.session_state.pickup_location = selected_zone
+                else:
+                    st.session_state.dropoff_location = selected_zone
 
-    else:
+                st.rerun()
 
-        st.session_state.dropoff_location = selected_location
+            else:
+                st.warning(
+                    "That point is outside a recognized taxi zone. "
+                    "Please click on land within New York City."
+                )
 
-    st.rerun()
 
-# ---------------------------------------------------------
-# DISPLAY SELECTED LOCATIONS
-# ---------------------------------------------------------
+# --------------------------------------------------
+# DISPLAY SELECTED ZONES
+# --------------------------------------------------
 
-if st.session_state.pickup_location:
-
-    st.success(
-        f"📍 Pickup: "
-        f"{st.session_state.pickup_location['lat']:.5f}, "
-        f"{st.session_state.pickup_location['lng']:.5f}"
-    )
-
-if st.session_state.dropoff_location:
-
-    st.success(
-        f"🚩 Drop-off: "
-        f"{st.session_state.dropoff_location['lat']:.5f}, "
-        f"{st.session_state.dropoff_location['lng']:.5f}"
-    )
-
-st.divider()
-
-# ---------------------------------------------------------
-# TRIP DETAILS
-# ---------------------------------------------------------
-
-st.subheader("Enter Trip Details")
+st.subheader("🗺️ Selected Taxi Zones")
 
 col1, col2 = st.columns(2)
 
-# ---------------------------------------------------------
-# LEFT COLUMN
-# ---------------------------------------------------------
+with col1:
+    st.markdown("### 📍 Pickup")
+
+    pickup = st.session_state.pickup_location
+
+    if pickup:
+        st.success(
+            f"Zone: {pickup['zone']}\n\n"
+            f"Borough: {pickup['borough']}\n\n"
+            f"Location ID: {pickup['location_id']}"
+        )
+    else:
+        st.warning("Select your pickup location on the map.")
+
+with col2:
+    st.markdown("### 🚩 Drop-off")
+
+    dropoff = st.session_state.dropoff_location
+
+    if dropoff:
+        st.success(
+            f"Zone: {dropoff['zone']}\n\n"
+            f"Borough: {dropoff['borough']}\n\n"
+            f"Location ID: {dropoff['location_id']}"
+        )
+    else:
+        st.warning("Select your drop-off location on the map.")
+
+
+# --------------------------------------------------
+# TRIP DETAILS
+# --------------------------------------------------
+
+st.divider()
+st.subheader("🚖 Trip Details")
+
+col1, col2, col3 = st.columns(3)
 
 with col1:
-
     trip_distance = st.number_input(
         "Trip Distance (miles)",
         min_value=0.1,
+        max_value=100.0,
         value=2.5,
-        step=0.1
+        step=0.1,
     )
 
     passenger_count = st.number_input(
@@ -176,115 +313,156 @@ with col1:
         min_value=1,
         max_value=6,
         value=2,
-        step=1
+        step=1,
     )
 
     trip_duration = st.number_input(
         "Trip Duration (minutes)",
         min_value=1.0,
+        max_value=300.0,
         value=20.0,
-        step=1.0
+        step=1.0,
     )
-
-    pickup_hour = st.number_input(
-        "Pickup Hour (0–23)",
-        min_value=0,
-        max_value=23,
-        value=18,
-        step=1
-    )
-
-# ---------------------------------------------------------
-# RIGHT COLUMN
-# ---------------------------------------------------------
 
 with col2:
-
-    pickup_month = st.number_input(
-        "Pickup Month (1–4)",
-        min_value=1,
-        max_value=4,
-        value=3,
-        step=1
+    pickup_hour = st.selectbox(
+        "Pickup Hour",
+        options=list(range(24)),
+        index=18,
     )
 
-    pickup_day_of_week = st.number_input(
-        "Pickup Day of Week (0–6)",
-        min_value=0,
-        max_value=6,
-        value=2,
-        step=1
+    pickup_month = st.selectbox(
+        "Pickup Month",
+        options=list(range(1, 13)),
+        index=2,
     )
 
-    pu_location = st.number_input(
-        "Pickup Location ID",
-        min_value=1,
-        value=161,
-        step=1
+with col3:
+    pickup_day_of_week = st.selectbox(
+        "Pickup Day of Week",
+        options=list(range(7)),
+        index=2,
+        format_func=lambda day: [
+            "Monday",
+            "Tuesday",
+            "Wednesday",
+            "Thursday",
+            "Friday",
+            "Saturday",
+            "Sunday",
+        ][day],
     )
 
-    do_location = st.number_input(
-        "Drop-off Location ID",
-        min_value=1,
-        value=236,
-        step=1
-    )
+    st.write("**Pickup Location ID**")
 
-st.divider()
+    if pickup:
+        st.text_input(
+            "Pickup Zone ID",
+            value=str(pickup["location_id"]),
+            disabled=True,
+            label_visibility="collapsed",
+        )
+    else:
+        st.text_input(
+            "Pickup Zone ID",
+            value="Select on map",
+            disabled=True,
+            label_visibility="collapsed",
+        )
 
-# ---------------------------------------------------------
+    st.write("**Drop-off Location ID**")
+
+    if dropoff:
+        st.text_input(
+            "Drop-off Zone ID",
+            value=str(dropoff["location_id"]),
+            disabled=True,
+            label_visibility="collapsed",
+        )
+    else:
+        st.text_input(
+            "Drop-off Zone ID",
+            value="Select on map",
+            disabled=True,
+            label_visibility="collapsed",
+        )
+
+
+# --------------------------------------------------
 # PREDICT FARE
-# ---------------------------------------------------------
+# --------------------------------------------------
 
-if st.button(
-    "🔮 Predict Fare",
-    use_container_width=True
-):
+if st.button("💰 Predict Taxi Fare", type="primary"):
 
-    try:
+    pickup = st.session_state.pickup_location
+    dropoff = st.session_state.dropoff_location
 
-        with st.spinner(
-            "Predicting your taxi fare..."
-        ):
-
-            # Connect to Databricks
-            workspace = WorkspaceClient(
-                host=st.secrets["DATABRICKS_HOST"],
-                client_id=st.secrets["DATABRICKS_CLIENT_ID"],
-                client_secret=st.secrets["DATABRICKS_CLIENT_SECRET"]
-            )
-
-            # Send data to model serving endpoint
-            response = workspace.serving_endpoints.query(
-                name="taxi-fare-prediction-endpoint",
-                dataframe_records=[
-                    {
-                        "trip_distance": trip_distance,
-                        "passenger_count": passenger_count,
-                        "pickup_hour": pickup_hour,
-                        "pickup_month": pickup_month,
-                        "pickup_day_of_week": pickup_day_of_week,
-                        "trip_duration_minutes": trip_duration,
-                        "PULocationID": pu_location,
-                        "DOLocationID": do_location
-                    }
-                ]
-            )
-
-            # Get prediction
-            prediction = response.predictions[0]
-
-        # Display prediction
-        st.success(
-            f"💰 Predicted Taxi Fare: ${prediction:.2f}"
+    if not pickup or not dropoff:
+        st.warning(
+            "Please select both pickup and drop-off zones "
+            "on the map before predicting the fare."
         )
 
-        st.caption(
-            "Prediction generated by a deployed Random Forest model."
-        )
+    elif trip_distance <= 0 or trip_duration <= 0:
+        st.warning("Trip distance and duration must be greater than zero.")
 
-    except Exception as e:
+    else:
+        with st.spinner("Predicting your taxi fare..."):
 
-        st.error(
-            f"Prediction failed: {type(e).__name__}: {e}"
-        )
+            try:
+                workspace = get_workspace_client()
+
+                response = workspace.serving_endpoints.query(
+                    name="taxi-fare-prediction-endpoint",
+                    dataframe_records=[
+                        {
+                            "trip_distance": float(trip_distance),
+                            "passenger_count": int(passenger_count),
+                            "pickup_hour": int(pickup_hour),
+                            "pickup_month": int(pickup_month),
+                            "pickup_day_of_week": int(
+                                pickup_day_of_week
+                            ),
+                            "trip_duration_minutes": float(
+                                trip_duration
+                            ),
+                            "PULocationID": int(
+                                pickup["location_id"]
+                            ),
+                            "DOLocationID": int(
+                                dropoff["location_id"]
+                            ),
+                        }
+                    ],
+                )
+
+                prediction = response.predictions[0]
+
+                st.success("Fare prediction completed!")
+
+                st.metric(
+                    label="Estimated Taxi Fare",
+                    value=f"${float(prediction):,.2f}",
+                )
+
+                st.caption(
+                    f"Pickup: {pickup['zone']}, "
+                    f"{pickup['borough']} "
+                    f"(ID: {pickup['location_id']})"
+                )
+
+                st.caption(
+                    f"Drop-off: {dropoff['zone']}, "
+                    f"{dropoff['borough']} "
+                    f"(ID: {dropoff['location_id']})"
+                )
+
+                st.caption(
+                    "This is a machine-learning estimate, "
+                    "not an official taxi fare quote."
+                )
+
+            except Exception:
+                st.error(
+                    "Fare prediction failed. Please try again later."
+                )
