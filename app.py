@@ -117,6 +117,5 @@ if st.button("🔮 Predict Fare", use_container_width=True):
 
     except Exception as e:
         st.error(
-            "Unable to predict the fare. Please try again later "
-            "or contact the application owner."
+            f"Prediction failed: {type(e).__name__}: {e}"
         )
